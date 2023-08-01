@@ -33,8 +33,9 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       base >=4.7 && <5
+    , bytestring
     , containers
-    , utf8-string
+    , network
   default-language: Haskell2010
 
 executable simple-db-client
@@ -47,9 +48,10 @@ executable simple-db-client
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -main-is Client
   build-depends:
       base >=4.7 && <5
+    , bytestring
     , containers
+    , network
     , simple-database
-    , utf8-string
   default-language: Haskell2010
 
 executable simple-db-server
@@ -62,9 +64,10 @@ executable simple-db-server
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -main-is Server
   build-depends:
       base >=4.7 && <5
+    , bytestring
     , containers
+    , network
     , simple-database
-    , utf8-string
   default-language: Haskell2010
 
 test-suite simple-database-test
@@ -78,7 +81,8 @@ test-suite simple-database-test
   build-depends:
       HUnit
     , base >=4.7 && <5
+    , bytestring
     , containers
+    , network
     , simple-database
-    , utf8-string
   default-language: Haskell2010

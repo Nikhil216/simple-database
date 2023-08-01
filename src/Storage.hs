@@ -19,7 +19,7 @@ module Storage
     ) where
 
 import qualified Data.Map as Map
-import qualified Data.ByteString.UTF8 as BS
+import qualified Data.ByteString as BS
 
 type Key = BS.ByteString
 type Value = BS.ByteString
