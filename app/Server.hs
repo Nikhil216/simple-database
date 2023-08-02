@@ -1,20 +1,53 @@
+{-# LANGUAGE OverloadedStrings #-}
+
 module Server (main) where
 
 import Control.Concurrent (forkFinally)
 import qualified Control.Exception as E
 import Control.Monad (unless, forever, void)
-import qualified Data.ByteString as S
+import qualified Data.ByteString as BS
 import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
+import System.Environment (getArgs)
+import qualified Storage as Sto
+
+data ServerLoopAction = Close | Continue
+    deriving (Show, Eq)
 
 main :: IO ()
-main = runTCPServer Nothing "3000" talk
+main = do
+    args <- getArgs
+    runServer (head args)
+
+execCmd :: Socket -> BS.ByteString -> IO ServerLoopAction
+execCmd s cmdStr = do
+    BS.putStr $ "Client: " <> cmdStr <> "\n"
+    case parseCmd cmdStr of
+        ("connect":_) -> do
+            sendAll s "Connected to simple-db server"
+            return Continue
+        ("disconnect":_) -> do
+            sendAll s "Closing connection..."
+            close s
+            return Continue
+        [] -> do
+            sendAll s $ ""
+            return Continue
+        _ -> do
+            sendAll s $ "Invalid command: " <> cmdStr
+            return Continue
+
+parseCmd :: BS.ByteString -> [BS.ByteString]
+parseCmd = BS.split 32
+    
+runServer :: String -> IO () 
+runServer port = runTCPServer Nothing port talk
   where
     talk s = do
-        msg <- recv s 1024
-        unless (S.null msg) $ do
-          sendAll s msg
-          talk s
+        cmd <- recv s 1024
+        action <- execCmd s cmd
+        unless (action == Close) $ do
+            talk s
 
 -- from the "network-run" package.
 runTCPServer :: Maybe HostName -> ServiceName -> (Socket -> IO a) -> IO a

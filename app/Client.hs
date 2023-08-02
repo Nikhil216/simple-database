@@ -3,8 +3,10 @@
 module Client (main) where
 
 import qualified Control.Exception as E
-import Control.Monad (unless)
-import qualified Data.ByteString.Char8 as C
+import Control.Concurrent (forkIO)
+import Control.Concurrent.Chan as Chan
+import Control.Monad (unless, forever)
+import qualified Data.ByteString as BS
 import Network.Socket
 import Network.Socket.ByteString (recv, sendAll)
 
@@ -12,31 +14,40 @@ data ConsoleLoopAction = Close | Continue
     deriving (Show, Eq)
 
 main :: IO ()
-main = consoleLoop
+main = do
+    netChan <- Chan.newChan
+    conChan <- Chan.newChan
+    _ <- forkIO (networkLoop netChan conChan)
+    BS.putStr "simple-db-client started\n"
+    consoleLoop netChan conChan
 
-consoleLoop :: IO ()
-consoleLoop = do
-    inputStr <- getLine
-    action <- runConsole inputStr
+consoleLoop :: Chan.Chan BS.ByteString -> Chan.Chan BS.ByteString -> IO ()
+consoleLoop netChan conChan = do
+    inputStr <- BS.getLine
+    action <- runConsole netChan conChan (BS.init inputStr) -- getting rid of trailing \r
     unless (action == Close) $ do
-        consoleLoop
+        consoleLoop netChan conChan
 
-runConsole :: String -> IO ConsoleLoopAction
-runConsole inputStr = case inputStr of
+runConsole :: Chan.Chan BS.ByteString -> Chan.Chan BS.ByteString -> BS.ByteString -> IO ConsoleLoopAction
+runConsole netChan conChan inputStr = case inputStr of
     "" -> return Continue
     "quit" -> return Close
-    "connect" -> do
-        connectNetwork
+    cmd -> do
+        Chan.writeChan netChan cmd
+        msg <- Chan.readChan conChan
+        BS.putStr $ msg <> "\n"
         return Continue
-    _ -> return Continue
-    
-connectNetwork :: IO ()
-connectNetwork = runTCPClient "127.0.0.1" "3000" $ \s -> do
-    sendAll s "Hello, world!"
-    msg <- recv s 1024
-    putStr "Received: "
-    C.putStrLn msg
 
+runNetwork :: (Socket -> IO a) -> IO a
+runNetwork = runTCPClient "127.0.0.1" "3000"
+
+networkLoop :: Chan.Chan BS.ByteString -> Chan.Chan BS.ByteString -> IO ()
+networkLoop netChan conChan = runNetwork $ \s -> forever $ do
+    cmd <- Chan.readChan netChan
+    sendAll s cmd
+    msg <- recv s 2048
+    Chan.writeChan conChan msg
+    
 -- from the "network-run" package.
 runTCPClient :: HostName -> ServiceName -> (Socket -> IO a) -> IO a
 runTCPClient host port client = withSocketsDo $ do
