@@ -2,7 +2,8 @@
 
 module Server (main) where
 
-import Control.Concurrent (forkFinally)
+import Control.Concurrent (forkFinally, forkIO)
+import Control.Concurrent.Chan as Chan
 import qualified Control.Exception as E
 import Control.Monad (unless, forever, void)
 import qualified Data.ByteString as BS
@@ -17,10 +18,15 @@ data ServerLoopAction = Close | Continue
 main :: IO ()
 main = do
     args <- getArgs
-    runServer (head args)
+    netChan <- Chan.newChan
+    stoChan <- Chan.newChan
+    let port = head args
+    putStrLn $ "Server listening on port: " <> port
+    _ <- forkIO (execStorage netChan stoChan Sto.emptyStore)
+    runServer netChan stoChan port
 
-execCmd :: Socket -> BS.ByteString -> IO ServerLoopAction
-execCmd s cmdStr = do
+execCmd :: Chan.Chan BS.ByteString -> Chan.Chan Sto.StorageAction -> Socket -> BS.ByteString -> IO ServerLoopAction
+execCmd netChan stoChan s cmdStr = do
     BS.putStr $ "Client: " <> cmdStr <> "\n"
     case parseCmd cmdStr of
         ("connect":_) -> do
@@ -29,6 +35,16 @@ execCmd s cmdStr = do
         ("disconnect":_) -> do
             sendAll s "Closing connection..."
             close s
+            return Continue
+        ("set":key:value:_) -> do
+            Chan.writeChan stoChan (Sto.SetStorage key value)
+            msg <- Chan.readChan netChan
+            sendAll s msg
+            return Continue
+        ("get":key:_) -> do
+            Chan.writeChan stoChan (Sto.GetStorage key)
+            msg <- Chan.readChan netChan
+            sendAll s msg
             return Continue
         [] -> do
             sendAll s $ ""
@@ -39,13 +55,27 @@ execCmd s cmdStr = do
 
 parseCmd :: BS.ByteString -> [BS.ByteString]
 parseCmd = BS.split 32
+ 
+execStorage :: Chan.Chan BS.ByteString -> Chan.Chan Sto.StorageAction -> Sto.Store -> IO a
+execStorage netChan stoChan store = do
+    op <- Chan.readChan stoChan
+    (msg, newStore) <- case op of
+        Sto.GetStorage key -> do
+            let (maybeValue, newStore) = Sto.getStore key store
+                msg = case maybeValue of
+                    Nothing -> "Key is not present: " <> key
+                    Just value -> value
+            return (msg, newStore)
+        Sto.SetStorage key value -> return (Sto.setStore key value store)
+    Chan.writeChan netChan msg
+    execStorage netChan stoChan newStore
     
-runServer :: String -> IO () 
-runServer port = runTCPServer Nothing port talk
+runServer :: Chan.Chan BS.ByteString -> Chan.Chan Sto.StorageAction -> String -> IO () 
+runServer netChan stoChan port = runTCPServer Nothing port talk
   where
     talk s = do
         cmd <- recv s 1024
-        action <- execCmd s cmd
+        action <- execCmd netChan stoChan s cmd
         unless (action == Close) $ do
             talk s
 

@@ -4,6 +4,8 @@ module Storage
     , Cursor (..)
     , KeyStore
     , ValueStore
+    , Store
+    , StorageAction (..)
     , emptyVS
     , initVS
     , appendVS
@@ -30,6 +32,8 @@ data Cursor = Cursor { getOffset :: Int
 type KeyStore = Map.Map Key Cursor
 type ValueStore = BS.ByteString
 type Store = (KeyStore, ValueStore)
+data StorageAction = SetStorage Key Value
+                   | GetStorage Key
 
 -- Value Store
 
@@ -76,15 +80,15 @@ emptyStore = (emptyKS, emptyVS)
 initStore :: [(Key, Cursor)] -> BS.ByteString -> Store
 initStore keyPairs value = (initKS keyPairs, initVS value)
 
-setStore :: Key -> Value -> Store -> Store
-setStore key value (ks, vs) = newStore
+setStore :: Key -> Value -> Store -> (Key, Store)
+setStore key value (ks, vs) = (key, newStore)
     where (newVS, cursor) = appendVS value vs
           newKS = insertKS key cursor ks
           newStore = (newKS, newVS)
 
-getStore :: Key -> Store -> (Store, Maybe Value)
+getStore :: Key -> Store -> (Maybe Value, Store)
 getStore key store@(ks, vs) = let maybeCursor = lookupKS key ks
                                   maybeValue = case maybeCursor of
                                                     Nothing -> Nothing
                                                     Just cursor -> Just . snd . readVS cursor $ vs
-                               in (store, maybeValue)
+                               in (maybeValue, store)

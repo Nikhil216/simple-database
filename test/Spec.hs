@@ -35,8 +35,8 @@ testStore :: Test
 testStore = let key = "1" :: BS.ByteString
                 value = "One" :: BS.ByteString
                 store0 = S.emptyStore
-                store1 = S.setStore key value store0
-                (store2, maybeValue) = S.getStore key store1
+                (_, store1) = S.setStore key value store0
+                (maybeValue, store2) = S.getStore key store1
             in  TestList [ TestCase (assertEqual "testStore - Setting and the getting the same value from the store"
                                         (Just value)
                                         maybeValue)]
