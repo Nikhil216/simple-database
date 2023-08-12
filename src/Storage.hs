@@ -4,8 +4,8 @@ module Storage
     , Cursor (..)
     , KeyStore
     , ValueStore
-    , Store
-    , StorageAction (..)
+    , KVStore
+    , KVStorageAction (..)
     , emptyVS
     , initVS
     , appendVS
@@ -14,10 +14,10 @@ module Storage
     , initKS
     , insertKS
     , lookupKS
-    , emptyStore
-    , initStore
-    , setStore
-    , getStore
+    , emptyKVStore
+    , initKVStore
+    , setKVStore
+    , getKVStore
     ) where
 
 import qualified Data.Map as Map
@@ -31,9 +31,9 @@ data Cursor = Cursor { getOffset :: Int
               deriving (Show, Eq)
 type KeyStore = Map.Map Key Cursor
 type ValueStore = BS.ByteString
-type Store = (KeyStore, ValueStore)
-data StorageAction = SetStorage Key Value
-                   | GetStorage Key
+type KVStore = (KeyStore, ValueStore)
+data KVStorageAction = SetKVStorage Key Value
+                     | GetKVStorage Key
 
 -- Value Store
 
@@ -72,23 +72,23 @@ insertKS = Map.insert
 lookupKS :: Key -> KeyStore -> Maybe Cursor
 lookupKS = Map.lookup
 
--- Store
+-- Key Value Pair Store
 
-emptyStore :: Store
-emptyStore = (emptyKS, emptyVS)
+emptyKVStore :: KVStore
+emptyKVStore = (emptyKS, emptyVS)
 
-initStore :: [(Key, Cursor)] -> BS.ByteString -> Store
-initStore keyPairs value = (initKS keyPairs, initVS value)
+initKVStore :: [(Key, Cursor)] -> BS.ByteString -> KVStore
+initKVStore keyPairs value = (initKS keyPairs, initVS value)
 
-setStore :: Key -> Value -> Store -> (Key, Store)
-setStore key value (ks, vs) = (key, newStore)
+setKVStore :: Key -> Value -> KVStore -> (Key, KVStore)
+setKVStore key value (ks, vs) = (key, newStore)
     where (newVS, cursor) = appendVS value vs
           newKS = insertKS key cursor ks
           newStore = (newKS, newVS)
 
-getStore :: Key -> Store -> (Maybe Value, Store)
-getStore key store@(ks, vs) = let maybeCursor = lookupKS key ks
-                                  maybeValue = case maybeCursor of
+getKVStore :: Key -> KVStore -> (Maybe Value, KVStore)
+getKVStore key store@(ks, vs) = let maybeCursor = lookupKS key ks
+                                    maybeValue = case maybeCursor of
                                                     Nothing -> Nothing
                                                     Just cursor -> Just . snd . readVS cursor $ vs
-                               in (maybeValue, store)
+                                in  (maybeValue, store)

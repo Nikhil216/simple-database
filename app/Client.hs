@@ -23,6 +23,7 @@ main = do
 
 consoleLoop :: Chan.Chan BS.ByteString -> Chan.Chan BS.ByteString -> IO ()
 consoleLoop netChan conChan = do
+    BS.putStr "> "
     inputStr <- BS.getLine
     action <- runConsole netChan conChan (BS.init inputStr) -- getting rid of trailing \r
     unless (action == Close) $ do

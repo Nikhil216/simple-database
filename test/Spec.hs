@@ -31,12 +31,12 @@ testKeyStore = TestList [ TestCase (assertEqual "testKeyStore - Insert key into 
                                       (Just (S.Cursor 5 6)))
                         ]
 
-testStore :: Test
-testStore = let key = "1" :: BS.ByteString
-                value = "One" :: BS.ByteString
-                store0 = S.emptyStore
-                (_, store1) = S.setStore key value store0
-                (maybeValue, store2) = S.getStore key store1
-            in  TestList [ TestCase (assertEqual "testStore - Setting and the getting the same value from the store"
-                                        (Just value)
-                                        maybeValue)]
+testKeyValueStore :: Test
+testKeyValueStore = let key = "1" :: BS.ByteString
+                        value = "One" :: BS.ByteString
+                        store0 = S.emptyKVStore
+                        (_, store1) = S.setKVStore key value store0
+                        (maybeValue, store2) = S.getKVStore key store1
+                    in  TestList [ TestCase (assertEqual "testKVStore - Setting and the getting the same value from the store"
+                                                (Just value)
+                                                maybeValue)]
