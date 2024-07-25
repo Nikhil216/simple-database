@@ -1,8 +1,8 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import qualified Data.ByteString as BS
-import qualified Storage as S
-import Test.HUnit
+import qualified Storage         as S
+import           Test.HUnit
 
 main :: IO Counts
 main = runTestTT testSuite
@@ -10,7 +10,7 @@ main = runTestTT testSuite
 testSuite :: Test
 testSuite = TestList [ testValueStore
                      , testKeyStore
-                     , testStore
+                     , testKeyValueStore
                      ]
 
 testValueStore :: Test

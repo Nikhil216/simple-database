@@ -1,6 +1,8 @@
 ## Features
 
 - [ ] Storage engine handles errors
+    - [ ] read: key not found
+    - [ ] 
 - [ ] Server handles errors and provides error messages in logs
 - [ ] Client handles errors from network and displays messages on console.
 - [ ] Value store is stored in file.
