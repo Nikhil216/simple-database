@@ -26,6 +26,7 @@ dependencies:
 - network
 - mtl
 - vector
+- utf8-string
 
 ghc-options:
 - -Wall
@@ -44,7 +45,7 @@ library:
 executables:
   simple-db-server:
     main:                Server.hs
-    source-dirs:         app
+    source-dirs:         app/Server
     ghc-options:
     - -threaded
     - -rtsopts
@@ -55,7 +56,7 @@ executables:
 
   simple-db-client:
     main:                Client.hs
-    source-dirs:         app
+    source-dirs:         app/Client
     ghc-options:
     - -threaded
     - -rtsopts
