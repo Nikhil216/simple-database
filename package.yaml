@@ -27,6 +27,8 @@ dependencies:
 - mtl
 - vector
 - utf8-string
+- time
+- directory
 
 ghc-options:
 - -Wall
