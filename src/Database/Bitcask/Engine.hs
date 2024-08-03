@@ -13,14 +13,13 @@ module Database.Bitcask.Engine
     ) where
 
 import System.IO
-import System.Directory
+import System.Directory (createDirectoryIfMissing, listDirectory)
 import System.IO.Error (catchIOError)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Digest.CRC32 (crc32)
 import qualified Data.List                 as L
 import qualified Data.Word                 as W
 import qualified Data.ByteString.Lazy      as BL
-import qualified Data.ByteString.Lazy.UTF8 as BLU
 import qualified Data.ByteString.Builder   as B
 import qualified Data.Map.Strict           as M
 
@@ -42,7 +41,7 @@ type Keydir = M.Map BL.ByteString KeyEntry
 
 type BitcaskHandle = (Integer, Handle, Keydir)
 
-newtype Session a = Session { run :: IO (Either IOError a) }
+newtype Session a = Session { runSession :: IO (Either IOError a) }
 
 instance Functor Session where
     fmap f (Session x) = Session ((fmap . fmap) f x)
@@ -50,6 +49,12 @@ instance Functor Session where
 instance Applicative Session where
     pure x = Session $ (pure . pure) x
     Session f <*> Session x = Session ((<*>) <$> f <*> x)
+    
+instance Monad Session where
+    x >>= f = Session $ do ea <- runSession x
+                           case ea of
+                               Left err -> return $ Left err
+                               Right a -> runSession $ f a
 
 getDataFilePath :: Integer -> FilePath
 getDataFilePath fileId = padLeft 3 '0' (show fileId) <> ".data"
@@ -75,66 +80,56 @@ builderDE tstamp ksz vsz key val = mconcat [ B.word64BE tstamp
 catch :: IO (Either IOError a) -> IO (Either IOError a)
 catch io = catchIOError io (pure . Left)
 
-open :: FilePath -> IO (Either IOError BitcaskHandle)
-open dirname = catch $ do createDirectoryIfMissing False dirname
-                          setCurrentDirectory dirname
-                          files <- listDirectory dirname
-                          let base = L.dropWhileEnd (/= '.')
-                              max' = L.foldl' max 1 . map (read . base)
-                              maxId = max' files :: Integer
-                              activeFileId = maxId + 1
-                              filename = getDataFilePath activeFileId
-                              filePath = dirname <> "\\" <> filename
-                              keydir = M.empty
-                          handle <- openFile filePath ReadWriteMode
-                          pure $ if activeFileId > 999
-                                     then Left $ userError "Error: Max file limit reached"
-                                     else Right (activeFileId, handle, keydir)
+open :: FilePath -> Session BitcaskHandle
+open dirname = Session . catch $ do createDirectoryIfMissing False dirname
+                                    files <- listDirectory dirname
+                                    let base = L.init . L.dropWhileEnd (/= '.')
+                                        max' = L.foldl' max 1 . map (read . base)
+                                        maxId = max' files :: Integer
+                                        activeFileId = maxId + 1
+                                        filename = getDataFilePath activeFileId
+                                        filePath = dirname <> "\\" <> filename
+                                        keydir = M.empty
+                                    handle <- openFile filePath ReadWriteMode
+                                    pure $ if activeFileId > 999
+                                               then Left $ userError "Error: Max file limit reached"
+                                               else Right (activeFileId, handle, keydir)
 
-sync :: BitcaskHandle -> IO (Either IOError ())
-sync (_, handle, _) = catch $ Right <$> hFlush handle
+sync :: BitcaskHandle -> Session ()
+sync (_, handle, _) = Session . catch $ Right <$> hFlush handle
 
-close :: BitcaskHandle -> IO (Either IOError ())
-close (_, handle, _) = catch $ do hFlush handle
-                                  Right <$> hClose handle
+close :: BitcaskHandle -> Session ()
+close (_, handle, _) = Session . catch $ do hFlush handle
+                                            Right <$> hClose handle
 
-put :: BL.ByteString -> BL.ByteString -> BitcaskHandle -> IO (Either IOError BitcaskHandle)
-put key val (fileId, handle, keydir) = catch $ do tstamp <- round . (* 1000) <$> getPOSIXTime
-                                                  hpos   <- hFileSize handle
-                                                  let ksz = fromIntegral . BL.length $ key
-                                                      vsz = fromIntegral . BL.length $ val
-                                                      bld = builderDE tstamp ksz vsz key val
-                                                      cks = cksumBuild bld
-                                                      str = B.toLazyByteString $ B.word32BE cks <> bld
-                                                      vps = fromIntegral $ fromIntegral hpos
-                                                                         + BL.length str
-                                                                         - fromIntegral vsz
-                                                      ken = KeyEntry (fromIntegral fileId) vsz vps tstamp
-                                                  update key str ken (fileId, handle, keydir)
+put :: BL.ByteString -> BL.ByteString -> BitcaskHandle -> Session BitcaskHandle
+put key val (fileId, handle, keydir) = Session . catch $ do tstamp <- round . (* 1000) <$> getPOSIXTime
+                                                            hpos   <- hFileSize handle
+                                                            let ksz = fromIntegral . BL.length $ key
+                                                                vsz = fromIntegral . BL.length $ val
+                                                                bld = builderDE tstamp ksz vsz key val
+                                                                cks = cksumBuild bld
+                                                                str = B.toLazyByteString $ B.word32BE cks <> bld
+                                                                vps = fromIntegral $ fromIntegral hpos
+                                                                                   + BL.length str
+                                                                                   - fromIntegral vsz
+                                                                ken = KeyEntry (fromIntegral fileId) vsz vps tstamp
+                                                            update key str ken (fileId, handle, keydir)
 
-get :: BL.ByteString -> BitcaskHandle -> IO (Either IOError BL.ByteString)
-get key (fileId, handle, keydir) = catch $ do let msg = "KeyError: Could not find key: "
-                                                      <> BLU.toString key
-                                              case M.lookup key keydir of
-                                                  Nothing -> pure . Left . userError $ msg
-                                                  Just ke -> fetchValue ke (fileId, handle, keydir)
+get :: BL.ByteString -> BitcaskHandle -> Session BL.ByteString
+get key (fileId, handle, keydir) = Session . catch $ do let msg = "KeyError: Could not find key: "
+                                                                <> show key
+                                                        case M.lookup key keydir of
+                                                            Nothing -> pure . Left . userError $ msg
+                                                            Just ke -> fetchValue ke (fileId, handle, keydir)
 
-listKeys :: BitcaskHandle -> IO (Either IOError [BL.ByteString])
-listKeys (_, _, keydir) = pure . Right . M.keys $ keydir
+listKeys :: BitcaskHandle -> Session [BL.ByteString]
+listKeys (_, _, keydir) = Session . pure . Right . M.keys $ keydir
 
 update :: BL.ByteString -> BL.ByteString -> KeyEntry -> BitcaskHandle -> IO (Either IOError BitcaskHandle)
-update key str keyEntry (fileId, handle, keydir) = catch $ do rest <- BL.hPutNonBlocking handle str
-                                                              hsz  <- hFileSize handle
+update key str keyEntry (fileId, handle, keydir) = catch $ do BL.hPut handle str
                                                               let keydir' = M.insert key keyEntry keydir
-                                                                  msg     = "WriteError: Could not write to disk: "
-                                                                          <> BLU.toString key
-                                                                          <> " => "
-                                                                          <> BLU.toString str
-                                                              case BL.length rest of
-                                                                  0 -> pure $ Right (fileId, handle, keydir')
-                                                                  _ -> do hSetFileSize handle hsz
-                                                                          hSeek handle SeekFromEnd 0
-                                                                          pure . Left $ userError msg
+                                                              pure $ Right (fileId, handle, keydir')
 
 fetchValue :: KeyEntry -> BitcaskHandle -> IO (Either IOError BL.ByteString)
 fetchValue ke (fileId, handle, _) = catch $ do let vsize = fromIntegral $ kVSize ke
