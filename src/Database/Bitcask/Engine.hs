@@ -13,6 +13,7 @@ module Database.Bitcask.Engine
     ) where
 
 import System.IO
+import Data.Bifunctor (Bifunctor(..))
 import System.Directory (createDirectoryIfMissing, listDirectory)
 import System.IO.Error (catchIOError)
 import Data.Time.Clock.POSIX (getPOSIXTime)
@@ -43,18 +44,32 @@ type BitcaskHandle = (Integer, Handle, Keydir)
 
 newtype Session a = Session { runSession :: IO (Either IOError a) }
 
+newtype State s a = State { runState :: s -> (a, s) }
+
 instance Functor Session where
     fmap f (Session x) = Session ((fmap . fmap) f x)
 
 instance Applicative Session where
     pure x = Session $ (pure . pure) x
     Session f <*> Session x = Session ((<*>) <$> f <*> x)
-    
+
 instance Monad Session where
     x >>= f = Session $ do ea <- runSession x
                            case ea of
                                Left err -> return $ Left err
                                Right a -> runSession $ f a
+
+instance Functor (State s) where
+    fmap f (State x) = State $ first f . x
+
+instance Applicative (State s) where
+    pure x = State (x,)
+    (State f') <*> x = State (\s -> let (f, s') = f' s
+                                    in  runState (fmap f x) s')
+
+instance Monad (State s) where
+    (State x) >>= f = State (\s -> let (a, s') = x s
+                                   in  runState (f a) s')
 
 getDataFilePath :: Integer -> FilePath
 getDataFilePath fileId = padLeft 3 '0' (show fileId) <> ".data"
