@@ -29,6 +29,7 @@ dependencies:
 - utf8-string
 - time
 - directory
+- transformers
 
 ghc-options:
 - -Wall

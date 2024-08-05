@@ -3,7 +3,8 @@
 
 module Database.Bitcask.Engine
     ( BitcaskHandle
-    , Session (..)
+    , Session
+    , runSession
     , open
     , sync
     , close
@@ -13,16 +14,16 @@ module Database.Bitcask.Engine
     ) where
 
 import System.IO
-import Data.Bifunctor (Bifunctor(..))
 import System.Directory (createDirectoryIfMissing, listDirectory)
-import System.IO.Error (catchIOError)
 import Data.Time.Clock.POSIX (getPOSIXTime)
 import Data.Digest.CRC32 (crc32)
+import Control.Monad.Trans.Except (ExceptT(..), runExceptT)
 import qualified Data.List                 as L
 import qualified Data.Word                 as W
 import qualified Data.ByteString.Lazy      as BL
 import qualified Data.ByteString.Builder   as B
 import qualified Data.Map.Strict           as M
+import qualified System.IO.Error           as E
 
 -- data DataEntry = DataEntry { dCRC    :: W.Word32
 --                            , dTStamp :: W.Word64
@@ -42,34 +43,10 @@ type Keydir = M.Map BL.ByteString KeyEntry
 
 type BitcaskHandle = (Integer, Handle, Keydir)
 
-newtype Session a = Session { runSession :: IO (Either IOError a) }
+type Session a = ExceptT IOError IO a
 
-newtype State s a = State { runState :: s -> (a, s) }
-
-instance Functor Session where
-    fmap f (Session x) = Session ((fmap . fmap) f x)
-
-instance Applicative Session where
-    pure x = Session $ (pure . pure) x
-    Session f <*> Session x = Session ((<*>) <$> f <*> x)
-
-instance Monad Session where
-    x >>= f = Session $ do ea <- runSession x
-                           case ea of
-                               Left err -> return $ Left err
-                               Right a -> runSession $ f a
-
-instance Functor (State s) where
-    fmap f (State x) = State $ first f . x
-
-instance Applicative (State s) where
-    pure x = State (x,)
-    (State f') <*> x = State (\s -> let (f, s') = f' s
-                                    in  runState (fmap f x) s')
-
-instance Monad (State s) where
-    (State x) >>= f = State (\s -> let (a, s') = x s
-                                   in  runState (f a) s')
+runSession :: ExceptT e m a -> m (Either e a)
+runSession = runExceptT
 
 getDataFilePath :: Integer -> FilePath
 getDataFilePath fileId = padLeft 3 '0' (show fileId) <> ".data"
@@ -92,77 +69,78 @@ builderDE tstamp ksz vsz key val = mconcat [ B.word64BE tstamp
                                            , B.lazyByteString val
                                            ]
 
-catch :: IO (Either IOError a) -> IO (Either IOError a)
-catch io = catchIOError io (pure . Left)
-
 open :: FilePath -> Session BitcaskHandle
-open dirname = Session . catch $ do createDirectoryIfMissing False dirname
-                                    files <- listDirectory dirname
-                                    let base = L.init . L.dropWhileEnd (/= '.')
-                                        max' = L.foldl' max 1 . map (read . base)
-                                        maxId = max' files :: Integer
-                                        activeFileId = maxId + 1
-                                        filename = getDataFilePath activeFileId
-                                        filePath = dirname <> "\\" <> filename
-                                        keydir = M.empty
-                                    handle <- openFile filePath ReadWriteMode
-                                    pure $ if activeFileId > 999
-                                               then Left $ userError "Error: Max file limit reached"
-                                               else Right (activeFileId, handle, keydir)
+open dirname = ExceptT $ do createDirectoryIfMissing False dirname
+                            files <- ls dirname
+                            let base = L.init . L.dropWhileEnd (/= '.')
+                                max' = L.foldl' max 1 . map (read . base)
+                                maxId = max' files :: Integer
+                                activeFileId = maxId + 1
+                                filename = getDataFilePath activeFileId
+                                filePath = dirname <> "\\" <> filename
+                                keydir = M.empty
+                            handle <- openFile filePath ReadWriteMode
+                            pure $ if activeFileId > 999
+                                       then Left $ userError "Error: Max file limit reached"
+                                       else Right (activeFileId, handle, keydir)
+    where ls name = E.catchIOError (listDirectory name) (\err ->
+                        if E.isDoesNotExistError err
+                            then pure []
+                            else E.ioError err)
 
 sync :: BitcaskHandle -> Session ()
-sync (_, handle, _) = Session . catch $ Right <$> hFlush handle
+sync (_, handle, _) = ExceptT $ Right <$> hFlush handle
 
 close :: BitcaskHandle -> Session ()
-close (_, handle, _) = Session . catch $ do hFlush handle
-                                            Right <$> hClose handle
+close (_, handle, _) = ExceptT $ do hFlush handle
+                                    Right <$> hClose handle
 
 put :: BL.ByteString -> BL.ByteString -> BitcaskHandle -> Session BitcaskHandle
-put key val (fileId, handle, keydir) = Session . catch $ do tstamp <- round . (* 1000) <$> getPOSIXTime
-                                                            hpos   <- hFileSize handle
-                                                            let ksz = fromIntegral . BL.length $ key
-                                                                vsz = fromIntegral . BL.length $ val
-                                                                bld = builderDE tstamp ksz vsz key val
-                                                                cks = cksumBuild bld
-                                                                str = B.toLazyByteString $ B.word32BE cks <> bld
-                                                                vps = fromIntegral $ fromIntegral hpos
-                                                                                   + BL.length str
-                                                                                   - fromIntegral vsz
-                                                                ken = KeyEntry (fromIntegral fileId) vsz vps tstamp
-                                                            update key str ken (fileId, handle, keydir)
+put key val (fileId, handle, keydir) = ExceptT $ do tstamp <- round . (* 1000) <$> getPOSIXTime
+                                                    hpos   <- hFileSize handle
+                                                    let ksz = fromIntegral . BL.length $ key
+                                                        vsz = fromIntegral . BL.length $ val
+                                                        bld = builderDE tstamp ksz vsz key val
+                                                        cks = cksumBuild bld
+                                                        str = B.toLazyByteString $ B.word32BE cks <> bld
+                                                        vps = fromIntegral $ fromIntegral hpos
+                                                                           + BL.length str
+                                                                           - fromIntegral vsz
+                                                        ken = KeyEntry (fromIntegral fileId) vsz vps tstamp
+                                                    update key str ken (fileId, handle, keydir)
 
 get :: BL.ByteString -> BitcaskHandle -> Session BL.ByteString
-get key (fileId, handle, keydir) = Session . catch $ do let msg = "KeyError: Could not find key: "
-                                                                <> show key
-                                                        case M.lookup key keydir of
-                                                            Nothing -> pure . Left . userError $ msg
-                                                            Just ke -> fetchValue ke (fileId, handle, keydir)
+get key (fileId, handle, keydir) = ExceptT $ do let msg = "KeyError: Could not find key: "
+                                                        <> show key
+                                                case M.lookup key keydir of
+                                                    Nothing -> pure . Left . userError $ msg
+                                                    Just ke -> fetchValue ke (fileId, handle, keydir)
 
 listKeys :: BitcaskHandle -> Session [BL.ByteString]
-listKeys (_, _, keydir) = Session . pure . Right . M.keys $ keydir
+listKeys (_, _, keydir) = ExceptT . pure . Right . M.keys $ keydir
 
 update :: BL.ByteString -> BL.ByteString -> KeyEntry -> BitcaskHandle -> IO (Either IOError BitcaskHandle)
-update key str keyEntry (fileId, handle, keydir) = catch $ do BL.hPut handle str
-                                                              let keydir' = M.insert key keyEntry keydir
-                                                              pure $ Right (fileId, handle, keydir')
+update key str keyEntry (fileId, handle, keydir) = do BL.hPut handle str
+                                                      let keydir' = M.insert key keyEntry keydir
+                                                      pure $ Right (fileId, handle, keydir')
 
 fetchValue :: KeyEntry -> BitcaskHandle -> IO (Either IOError BL.ByteString)
-fetchValue ke (fileId, handle, _) = catch $ do let vsize = fromIntegral $ kVSize ke
-                                                   vpos  = fromIntegral $ kVPos ke
-                                                   fId   = fromIntegral $ kFileId ke
-                                                   fPath = getDataFilePath fId
-                                                   msg   = "ReadError: Could not read from disk: "
-                                                         <> "file: "
-                                                         <> getDataFilePath fId
-                                                         <> ", position: "
-                                                         <> show vpos
-                                                         <> ", size: "
-                                                         <> show vsize
-                                               hld <- if fId == fileId
-                                                          then pure handle
-                                                          else openFile fPath ReadMode
-                                               hSeek hld AbsoluteSeek vpos
-                                               str <- BL.hGetNonBlocking hld vsize
-                                               if BL.length str == fromIntegral vsize
-                                                   then pure . Right $ str
-                                                   else pure . Left $ userError msg
+fetchValue ke (fileId, handle, _) = do let vsize = fromIntegral $ kVSize ke
+                                           vpos  = fromIntegral $ kVPos ke
+                                           fId   = fromIntegral $ kFileId ke
+                                           fPath = getDataFilePath fId
+                                           msg   = "ReadError: Could not read from disk: "
+                                                 <> "file: "
+                                                 <> getDataFilePath fId
+                                                 <> ", position: "
+                                                 <> show vpos
+                                                 <> ", size: "
+                                                 <> show vsize
+                                       hld <- if fId == fileId
+                                                  then pure handle
+                                                  else openFile fPath ReadMode
+                                       hSeek hld AbsoluteSeek vpos
+                                       str <- BL.hGetNonBlocking hld vsize
+                                       if BL.length str == fromIntegral vsize
+                                           then pure . Right $ str
+                                           else pure . Left $ userError msg
