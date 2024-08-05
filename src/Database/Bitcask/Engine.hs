@@ -45,7 +45,7 @@ type BitcaskHandle = (Integer, Handle, Keydir)
 
 type Session a = ExceptT IOError IO a
 
-runSession :: ExceptT e m a -> m (Either e a)
+runSession :: Session a -> IO (Either IOError a)
 runSession = runExceptT
 
 getDataFilePath :: Integer -> FilePath
