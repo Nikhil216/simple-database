@@ -35,11 +35,13 @@ library
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints
   build-depends:
       base >=4.7 && <5
+    , binary
     , bytestring
     , containers
     , directory
     , mtl
     , network
+    , text
     , time
     , transformers
     , utf8-string
@@ -55,12 +57,14 @@ executable cksum
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -main-is Cksum -funfolding-use-threshold=16 -O2 -optc-O3
   build-depends:
       base >=4.7 && <5
+    , binary
     , bytestring
     , containers
     , directory
     , mtl
     , network
     , simple-database
+    , text
     , time
     , transformers
     , utf8-string
@@ -76,12 +80,14 @@ executable simple-db-client
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -main-is Client
   build-depends:
       base >=4.7 && <5
+    , binary
     , bytestring
     , containers
     , directory
     , mtl
     , network
     , simple-database
+    , text
     , time
     , transformers
     , utf8-string
@@ -97,12 +103,14 @@ executable simple-db-server
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -main-is Server
   build-depends:
       base >=4.7 && <5
+    , binary
     , bytestring
     , containers
     , directory
     , mtl
     , network
     , simple-database
+    , text
     , time
     , transformers
     , utf8-string
@@ -120,12 +128,14 @@ test-suite simple-database-test
   build-depends:
       HUnit
     , base >=4.7 && <5
+    , binary
     , bytestring
     , containers
     , directory
     , mtl
     , network
     , simple-database
+    , text
     , time
     , transformers
     , utf8-string

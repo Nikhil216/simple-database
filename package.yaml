@@ -30,6 +30,8 @@ dependencies:
 - time
 - directory
 - transformers
+- text
+- binary
 
 ghc-options:
 - -Wall
