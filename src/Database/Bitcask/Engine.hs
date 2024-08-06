@@ -91,8 +91,8 @@ createKeydir :: [(Integer, BL.ByteString)] -> Session Keydir
 createKeydir fs = lift . fst . L.foldl' go (M.empty, 0) $ rows
     where lift = ExceptT . pure . Right
           file = fmap (bimap fromIntegral parseDataFile) fs
-          -- validate row crc
-          rows = concatMap (\(fId, es) -> map (fId,) es) file
+          rows = concatMap (filter valid . (\(fId, rs) -> map (fId,) rs)) file
+          valid (_, DataEntry crc tsp ksz vsz key val) = crc == cksumBuild (builderDE tsp ksz vsz key val)
           go (kd, bs) (fId, r) = ( M.insert (dKey r) (KeyEntry fId (dVSize r) vpos (dTStamp r)) kd
                                  , vpos + dVSize r
                                  )
