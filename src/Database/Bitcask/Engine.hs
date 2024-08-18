@@ -55,7 +55,8 @@ open :: FilePath -> Session BitcaskHandle
 open dirname = do _          <- mkdir dirname
                   files      <- readDataFiles dirname
                   keydir     <- createKeydir files
-                  (fId, hdl) <- getActiveHandle dirname files
+                  let ids = map fst files
+                  (fId, hdl) <- getActiveHandle dirname ids
                   return (dirname, fId, hdl, keydir)
 
 sync :: BitcaskHandle -> Session ()
@@ -69,19 +70,16 @@ close (_, _, handle, _) = ExceptT $ do
 put :: BL.ByteString -> BL.ByteString -> BitcaskHandle -> Session BitcaskHandle
 put key val (dirname, fileId, handle, keydir) = ExceptT $ do 
     tstamp <- round . (* 1000) <$> getPOSIXTime
-    hpos   <- hFileSize handle
-    let ksz = fromIntegral . BL.length $ key
-        vsz = fromIntegral . BL.length $ val
-        bld = builderDE tstamp ksz vsz key val
-        cks = cksumBuild bld
-        row = B.toLazyByteString $ B.word32BE cks <> bld
-        vps = fromIntegral $ fromIntegral hpos
-                           + BL.length row
-                           - fromIntegral vsz
-        ken = KeyEntry (fromIntegral fileId) vsz vps tstamp
-        kd' = M.insert key ken keydir
-    BL.hPut handle row
-    pure $ Right (dirname, fileId, handle, kd')
+    size   <- hFileSize handle
+    if size > 2 ^ (17 :: Integer) -- 128 KiB
+        then do
+            hClose handle
+            fs <- listDirectory dirname
+            let ids = map (read . L.takeWhile (/= '.')) fs
+            runExceptT $ do (fId, hdl) <- getActiveHandle dirname ids
+                            updateValue key val tstamp 0 (dirname, fId, hdl, keydir)
+        else do
+            runExceptT $ updateValue key val tstamp size (dirname, fileId, handle, keydir)
 
 get :: BL.ByteString -> BitcaskHandle -> Session BL.ByteString
 get key (dirname, fileId, handle, keydir) = ExceptT $ do 
@@ -120,15 +118,16 @@ readDataFiles dirname = catchLift $ do
                            then pure . Left $ userError msg
                            else E.ioError err
           msg = "Data file is already active. Please close the"
-              <> "running BitcaskHandle or close the file handle"
+              <> " running BitcaskHandle or close the file handle"
 
 createKeydir :: [(Integer, BL.ByteString)] -> Session Keydir
-createKeydir fs = lift keydir
+createKeydir = lift . keydir . mkRows . mkFiles
     where lift = ExceptT . pure . Right
-          files = fmap (bimap fromIntegral parseDataFile) fs
-          rows = concatMap (\(fId, rs) -> map (fId,) rs) files
-          validRows = filter (validate . snd) rows
-          keydir = fst $ L.foldl' go (M.empty, 0) validRows
+          keydir = L.foldl' mkKeydir M.empty
+          mkFiles = fmap (bimap fromIntegral parseDataFile)
+          mkRows = fmap (\(fId, rs) -> map (fId,) (ckRows rs))
+          ckRows = filter validate
+          mkKeydir kd rs = fst $ L.foldl' go (kd, 0) rs
           go (kd, bs) (fId, r) = (kd', pos)
               -- adding bytes taken by DataEntry
               where vpos = bs + 4 + 8 + 4 + 4 + dKSize r
@@ -136,12 +135,11 @@ createKeydir fs = lift keydir
                     pos = vpos + dVSize r
                     kd' = M.insert (dKey r) keyE kd
 
-getActiveHandle :: String -> [(Integer, BL.ByteString)] -> Session (Integer, Handle)
-getActiveHandle dirname fs = ExceptT $ do
+getActiveHandle :: String -> [Integer] -> Session (Integer, Handle)
+getActiveHandle dirname ids = ExceptT $ do
         hdl <- openFile fpath ReadWriteMode
         pure . Right $ (fId, hdl)
-    where ids = map fst fs
-          fId = L.foldl max 0 ids + 1
+    where fId = L.foldl max 0 ids + 1
           fname = getDataFilePath fId
           fpath = dirname <> "\\" <> fname
 
@@ -186,6 +184,21 @@ fetchValue ke (dirname, fileId, handle, _) = do
                 <> "file: " <> getDataFilePath fId
                 <> ", position: " <> show vpos
                 <> ", size: " <> show vsize
+    
+updateValue :: BL.ByteString -> BL.ByteString -> W.Word64 -> Integer -> BitcaskHandle -> Session BitcaskHandle
+updateValue key val  tstamp size (dirname, fileId, handle, keydir) = ExceptT $ do
+    let ksz = fromIntegral . BL.length $ key
+        vsz = fromIntegral . BL.length $ val
+        bld = builderDE tstamp ksz vsz key val
+        cks = cksumBuild bld
+        row = B.toLazyByteString $ B.word32BE cks <> bld
+        vps = fromIntegral $ fromIntegral size
+                           + BL.length row
+                           - fromIntegral vsz
+        ken = KeyEntry (fromIntegral fileId) vsz vps tstamp
+        kd' = M.insert key ken keydir
+    BL.hPut handle row
+    pure $ Right (dirname, fileId, handle, kd')
 
 validate :: DataEntry -> Bool
 validate (DataEntry crc tsp ksz vsz key val) = crc == cksumBuild (builderDE tsp ksz vsz key val)
