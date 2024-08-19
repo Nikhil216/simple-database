@@ -55,7 +55,7 @@ open :: FilePath -> Session BitcaskHandle
 open dirname = do _          <- mkdir dirname
                   files      <- readDataFiles dirname
                   keydir     <- createKeydir files
-                  let ids = map fst files
+                  let ids     = map fst files
                   (fId, hdl) <- getActiveHandle dirname ids
                   return (dirname, fId, hdl, keydir)
 
@@ -63,29 +63,30 @@ sync :: BitcaskHandle -> Session ()
 sync (_, _, handle, _) = ExceptT $ Right <$> hFlush handle
 
 close :: BitcaskHandle -> Session ()
-close (_, _, handle, _) = ExceptT $ do
+close (_, _, handle, _) = ExceptT $ Right <$> do
     hFlush handle
-    Right <$> hClose handle
+    hClose handle
 
 put :: BL.ByteString -> BL.ByteString -> BitcaskHandle -> Session BitcaskHandle
-put key val (dirname, fileId, handle, keydir) = ExceptT $ do 
+put key val (dirname, fileId, handle, keydir) = ExceptT $ do
     tstamp <- round . (* 1000) <$> getPOSIXTime
     size   <- hFileSize handle
+    let update = updateValue key val tstamp
     if size > 2 ^ (17 :: Integer) -- 128 KiB
         then do
             hClose handle
-            fs <- listDirectory dirname
-            let ids = map (read . L.takeWhile (/= '.')) fs
+            fnames <- listDirectory dirname
+            let ids = map filename2id fnames
             runExceptT $ do (fId, hdl) <- getActiveHandle dirname ids
-                            updateValue key val tstamp 0 (dirname, fId, hdl, keydir)
-        else do
-            runExceptT $ updateValue key val tstamp size (dirname, fileId, handle, keydir)
+                            update 0 (dirname, fId, hdl, keydir)
+        else
+            runExceptT $ update size (dirname, fileId, handle, keydir)
 
 get :: BL.ByteString -> BitcaskHandle -> Session BL.ByteString
-get key (dirname, fileId, handle, keydir) = ExceptT $ do 
-        case M.lookup key keydir of
-            Nothing -> pure . Left . userError $ msg
-            Just ke -> fetchValue ke (dirname, fileId, handle, keydir)
+get key (dirname, fileId, handle, keydir) = ExceptT $ do
+    case M.lookup key keydir of
+        Nothing -> pure . Left . userError $ msg
+        Just ke -> fetchValue ke (dirname, fileId, handle, keydir)
     where msg = "KeyError: Could not find key: " <> show key
 
 listKeys :: BitcaskHandle -> Session [BL.ByteString]
@@ -93,9 +94,9 @@ listKeys (_, _, _, keydir) = ExceptT . pure . Right . M.keys $ keydir
 
 mkdir :: FilePath -> Session Bool
 mkdir dirname = catchLift $ do
-        exists <- doesDirectoryExist dirname
-        createDirectoryIfMissing False dirname
-        pure . Right $ not exists
+    exists <- doesDirectoryExist dirname
+    createDirectoryIfMissing False dirname
+    pure . Right $ not exists
     where catchLift = ExceptT . flip E.catchIOError handle
           handle err = if E.isDoesNotExistError err
                            then pure . Left $ userError msg
@@ -106,14 +107,12 @@ mkdir dirname = catchLift $ do
 
 readDataFiles :: FilePath -> Session [(Integer, BL.ByteString)]
 readDataFiles dirname = catchLift $ do
-        fnames   <- listDirectory dirname
-        contents <- mapM BL.readFile . fps $ fnames
-        filterLift $ zip (ids fnames) contents
-    where fps = map ((dirname <> "\\") <>)
-          ids = map (read . L.takeWhile (/= '.'))
-          notEmpty x = BL.length (snd x) /= 0
+    fnames   <- listDirectory dirname
+    contents <- mapM (BL.readFile . (dirname \\)) fnames
+    filterLift $ zip (map filename2id fnames) contents
+    where notEmpty x = BL.length (snd x) /= 0
           filterLift = pure . Right . filter notEmpty
-          catchLift = ExceptT . flip E.catchIOError handle
+          catchLift  = ExceptT . flip E.catchIOError handle
           handle err = if E.isAlreadyInUseError err
                            then pure . Left $ userError msg
                            else E.ioError err
@@ -121,27 +120,27 @@ readDataFiles dirname = catchLift $ do
               <> " running BitcaskHandle or close the file handle"
 
 createKeydir :: [(Integer, BL.ByteString)] -> Session Keydir
-createKeydir = lift . keydir . mkRows . mkFiles
+createKeydir = lift . mkKeydir . distribute . mkRows
     where lift = ExceptT . pure . Right
-          keydir = L.foldl' mkKeydir M.empty
-          mkFiles = fmap (bimap fromIntegral parseDataFile)
-          mkRows = fmap (\(fId, rs) -> map (fId,) (ckRows rs))
-          ckRows = filter validate
-          mkKeydir kd rs = fst $ L.foldl' go (kd, 0) rs
-          go (kd, bs) (fId, r) = (kd', pos)
+          mkKeydir         = L.foldl' mkKeyEntry M.empty
+          mkRows           = fmap (bimap fromIntegral parseDataFile)
+          distribute       = fmap (\(fId, rs) -> map (fId,) (ckRows rs))
+          ckRows           = filter validate
+          mkKeyEntry kd rs = fst $ L.foldl' go (kd, 0) rs
+          go (kd, pos) (fId, r) = (kd', pos')
               -- adding bytes taken by DataEntry
-              where vpos = bs + 4 + 8 + 4 + 4 + dKSize r
+              where vpos = pos + 4 + 8 + 4 + 4 + dKSize r
                     keyE = KeyEntry fId (dVSize r) vpos (dTStamp r)
-                    pos = vpos + dVSize r
-                    kd' = M.insert (dKey r) keyE kd
+                    pos' = vpos + dVSize r
+                    kd'  = M.insert (dKey r) keyE kd
 
 getActiveHandle :: String -> [Integer] -> Session (Integer, Handle)
 getActiveHandle dirname ids = ExceptT $ do
-        hdl <- openFile fpath ReadWriteMode
-        pure . Right $ (fId, hdl)
-    where fId = L.foldl max 0 ids + 1
+    hdl <- openFile fpath ReadWriteMode
+    pure . Right $ (fId, hdl)
+    where fId   = L.foldl max 0 ids + 1
           fname = getDataFilePath fId
-          fpath = dirname <> "\\" <> fname
+          fpath = dirname \\ fname
 
 parseDataFile :: BL.ByteString -> [DataEntry]
 parseDataFile = go decoder
@@ -168,23 +167,23 @@ getDataEntry = do crc    <- G.getWord32be
 
 fetchValue :: KeyEntry -> BitcaskHandle -> IO (Either IOError BL.ByteString)
 fetchValue ke (dirname, fileId, handle, _) = do
-        hld <- if fId == fileId
-                   then pure handle
-                   else openFile fPath ReadMode
-        hSeek hld AbsoluteSeek vpos
-        str <- BL.hGetNonBlocking hld vsize
-        if BL.length str == fromIntegral vsize
-            then pure . Right $ str
-            else pure . Left  $ userError msg
+    hld <- if fId == fileId
+               then pure handle
+               else openFile fPath ReadMode
+    hSeek hld AbsoluteSeek vpos
+    str <- BL.hGetNonBlocking hld vsize
+    if BL.length str == fromIntegral vsize
+        then pure . Right $ str
+        else pure . Left  $ userError msg
     where vsize = fromIntegral $ kVSize ke
           vpos  = fromIntegral $ kVPos ke
           fId   = fromIntegral $ kFileId ke
-          fPath = dirname <> "\\" <> getDataFilePath fId
+          fPath = dirname \\ getDataFilePath fId
           msg   = "ReadError: Could not read from disk: "
                 <> "file: " <> getDataFilePath fId
                 <> ", position: " <> show vpos
                 <> ", size: " <> show vsize
-    
+
 updateValue :: BL.ByteString -> BL.ByteString -> W.Word64 -> Integer -> BitcaskHandle -> Session BitcaskHandle
 updateValue key val  tstamp size (dirname, fileId, handle, keydir) = ExceptT $ do
     let ksz = fromIntegral . BL.length $ key
@@ -223,3 +222,12 @@ builderDE tstamp ksz vsz key val = mconcat [ B.word64BE tstamp
                                            , B.lazyByteString key
                                            , B.lazyByteString val
                                            ]
+
+-- | Convert a data file name into an id
+--   Ex: "001.data" -> 1
+filename2id :: String -> Integer
+filename2id = read . L.takeWhile (/= '.')
+
+-- | Path seperator (Windows)
+(\\) :: FilePath -> FilePath -> FilePath
+parent \\ child = parent <> "\\" <> child
