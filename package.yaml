@@ -32,6 +32,7 @@ dependencies:
 - transformers
 - text
 - binary
+- deepseq
 
 ghc-options:
 - -Wall
@@ -81,6 +82,30 @@ executables:
     - -funfolding-use-threshold=16
     - -O2
     - -optc-O3 
+    dependencies:
+    - simple-database
+
+  write-bench:
+    main:                Write.hs
+    source-dirs:         app/Bench
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -main-is Write
+    - -O2
+    dependencies:
+    - simple-database
+
+  open-bench:
+    main:                Open.hs
+    source-dirs:         app/Bench
+    ghc-options:
+    - -threaded
+    - -rtsopts
+    - -with-rtsopts=-N
+    - -main-is Open
+    - -O2
     dependencies:
     - simple-database
 

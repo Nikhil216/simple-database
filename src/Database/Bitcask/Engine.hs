@@ -1,3 +1,4 @@
+{-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TupleSections #-}
 {-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
@@ -14,6 +15,7 @@ module Database.Bitcask.Engine
     ) where
 
 import           System.IO
+import           Control.DeepSeq               (force)
 import           Data.Digest.CRC32             (crc32)
 import           System.Directory              (createDirectoryIfMissing, listDirectory, doesDirectoryExist)
 import           Data.Time.Clock.POSIX         (getPOSIXTime)
@@ -69,11 +71,12 @@ close (_, _, handle, _) = ExceptT $ Right <$> do
 
 put :: BL.ByteString -> BL.ByteString -> BitcaskHandle -> Session BitcaskHandle
 put key val (dirname, fileId, handle, keydir) = ExceptT $ do
-    tstamp <- round . (* 1000) <$> getPOSIXTime
+    tstamp <- round . (* 1000) . force <$> getPOSIXTime
     size   <- hFileSize handle
     let update = updateValue key val tstamp
-    if size > 2 ^ (17 :: Integer) -- 128 KiB
+    if size > 2 ^ (27 :: Integer) -- 128 MiB
         then do
+            hFlush handle
             hClose handle
             fnames <- listDirectory dirname
             let ids = map filename2id fnames
@@ -130,9 +133,9 @@ createKeydir = lift . mkKeydir . distribute . mkRows
           go (kd, pos) (fId, r) = (kd', pos')
               -- adding bytes taken by DataEntry
               where vpos = pos + 4 + 8 + 4 + 4 + dKSize r
-                    keyE = KeyEntry fId (dVSize r) vpos (dTStamp r)
-                    pos' = vpos + dVSize r
-                    kd'  = M.insert (dKey r) keyE kd
+                    !keyE = KeyEntry fId (dVSize r) vpos (dTStamp r)
+                    !pos' = vpos + dVSize r
+                    !kd'  = M.insert (dKey r) keyE kd
 
 getActiveHandle :: String -> [Integer] -> Session (Integer, Handle)
 getActiveHandle dirname ids = ExceptT $ do
@@ -146,11 +149,11 @@ parseDataFile :: BL.ByteString -> [DataEntry]
 parseDataFile = go decoder
     where decoder = G.runGetIncremental getDataEntry
           go :: G.Decoder DataEntry -> BL.ByteString -> [DataEntry]
-          go (G.Done rest _ entry) input = case BLI.chunk rest input of
+          go (G.Done rest _ entry) !input = case BLI.chunk rest input of
                                                BLI.Empty -> [entry]
-                                               bs -> entry : go decoder bs
-          go (G.Partial k) input = go (k . takeHeadChunk $ input) (dropHeadChunk input)
-          go (G.Fail _ _ msg) _  = error msg
+                                               bs        -> entry : go decoder bs
+          go (G.Partial k)         !input = go (k . takeHeadChunk $ input) (dropHeadChunk input)
+          go (G.Fail _ _ msg)       _     = error msg
           takeHeadChunk (BLI.Chunk bs _)  = Just bs
           takeHeadChunk _                 = Nothing
           dropHeadChunk (BLI.Chunk _ lbs) = lbs
@@ -186,16 +189,16 @@ fetchValue ke (dirname, fileId, handle, _) = do
 
 updateValue :: BL.ByteString -> BL.ByteString -> W.Word64 -> Integer -> BitcaskHandle -> Session BitcaskHandle
 updateValue key val  tstamp size (dirname, fileId, handle, keydir) = ExceptT $ do
-    let ksz = fromIntegral . BL.length $ key
-        vsz = fromIntegral . BL.length $ val
-        bld = builderDE tstamp ksz vsz key val
-        cks = cksumBuild bld
-        row = B.toLazyByteString $ B.word32BE cks <> bld
-        vps = fromIntegral $ fromIntegral size
+    let !ksz = fromIntegral . BL.length $ key
+        !vsz = fromIntegral . BL.length $ val
+        !bld = builderDE tstamp ksz vsz key val
+        !cks = cksumBuild bld
+        !row = B.toLazyByteString $ B.word32BE cks <> bld
+        !vps = fromIntegral $ fromIntegral size
                            + BL.length row
                            - fromIntegral vsz
-        ken = KeyEntry (fromIntegral fileId) vsz vps tstamp
-        kd' = M.insert key ken keydir
+        !ken = KeyEntry (fromIntegral fileId) vsz vps tstamp
+        !kd' = M.insert key ken keydir
     BL.hPut handle row
     pure $ Right (dirname, fileId, handle, kd')
 
