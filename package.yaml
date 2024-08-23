@@ -87,7 +87,7 @@ executables:
 
   write-bench:
     main:                Write.hs
-    source-dirs:         app/Bench
+    source-dirs:         app/Write
     ghc-options:
     - -threaded
     - -rtsopts
@@ -99,7 +99,7 @@ executables:
 
   open-bench:
     main:                Open.hs
-    source-dirs:         app/Bench
+    source-dirs:         app/Open
     ghc-options:
     - -threaded
     - -rtsopts

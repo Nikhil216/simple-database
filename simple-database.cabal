@@ -76,10 +76,9 @@ executable cksum
 executable open-bench
   main-is: Open.hs
   other-modules:
-      Write
       Paths_simple_database
   hs-source-dirs:
-      app/Bench
+      app/Open
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -main-is Open -O2
   build-depends:
       base >=4.7 && <5
@@ -149,10 +148,9 @@ executable simple-db-server
 executable write-bench
   main-is: Write.hs
   other-modules:
-      Open
       Paths_simple_database
   hs-source-dirs:
-      app/Bench
+      app/Write
   ghc-options: -Wall -Wcompat -Widentities -Wincomplete-record-updates -Wincomplete-uni-patterns -Wmissing-export-lists -Wmissing-home-modules -Wpartial-fields -Wredundant-constraints -threaded -rtsopts -with-rtsopts=-N -main-is Write -O2
   build-depends:
       base >=4.7 && <5
