@@ -11,6 +11,7 @@ module Database.Bitcask.Engine
     , close
     , put
     , get
+    , delete
     , listKeys
     ) where
 
@@ -26,6 +27,7 @@ import qualified Data.List                     as L
 import qualified Data.Word                     as W
 import qualified Data.ByteString.Lazy.Internal as BLI
 import qualified Data.ByteString.Lazy          as BL
+import qualified Data.ByteString.Lazy.UTF8     as BLU
 import qualified Data.ByteString.Builder       as B
 import qualified Data.Map.Strict               as M
 import qualified System.IO.Error               as E
@@ -85,12 +87,14 @@ put key val (dirname, fileId, handle, keydir) = ExceptT $ do
         else
             runExceptT $ update size (dirname, fileId, handle, keydir)
 
-get :: BL.ByteString -> BitcaskHandle -> Session BL.ByteString
+get :: BL.ByteString -> BitcaskHandle -> Session (Maybe BL.ByteString)
 get key (dirname, fileId, handle, keydir) = ExceptT $ do
     case M.lookup key keydir of
-        Nothing -> pure . Left . userError $ msg
-        Just ke -> fetchValue ke (dirname, fileId, handle, keydir)
-    where msg = "KeyError: Could not find key: " <> show key
+        Nothing -> pure . Right $ Nothing
+        Just ke -> (Just <$>) <$> fetchValue ke (dirname, fileId, handle, keydir)
+
+delete :: BL.ByteString -> BitcaskHandle -> Session BitcaskHandle
+delete key hdl@(_, fId, _, _) = put key (tombstone fId) hdl
 
 listKeys :: BitcaskHandle -> Session [BL.ByteString]
 listKeys (_, _, _, keydir) = ExceptT . pure . Right . M.keys $ keydir
@@ -133,9 +137,11 @@ createKeydir = lift . mkKeydir . distribute . mkRows
           go (kd, pos) (fId, r) = (kd', pos')
               -- adding bytes taken by DataEntry
               where vpos  = pos + 4 + 8 + 4 + 4 + dKSize r
-                    !keyE = KeyEntry fId (dVSize r) vpos (dTStamp r)
+                    !ken  = KeyEntry fId (dVSize r) vpos (dTStamp r)
                     !pos' = vpos + dVSize r
-                    !kd'  = M.insertWith latest (dKey r) keyE kd
+                    !kd'  = if isTombstone (fromIntegral fId) (dVal r)
+                               then M.delete (dKey r) kd
+                               else M.insertWith latest (dKey r) ken kd
 
 getActiveHandle :: String -> [Integer] -> Session (Integer, Handle)
 getActiveHandle dirname ids = ExceptT $ do
@@ -188,7 +194,7 @@ fetchValue ke (dirname, fileId, handle, _) = do
                 <> ", size: " <> show vsize
 
 updateValue :: BL.ByteString -> BL.ByteString -> W.Word64 -> Integer -> BitcaskHandle -> Session BitcaskHandle
-updateValue key val  tstamp size (dirname, fileId, handle, keydir) = ExceptT $ do
+updateValue key val tstamp size (dirname, fileId, handle, keydir) = ExceptT $ do
     let !ksz = fromIntegral . BL.length $ key
         !vsz = fromIntegral . BL.length $ val
         !bld = builderDE tstamp ksz vsz key val
@@ -198,7 +204,9 @@ updateValue key val  tstamp size (dirname, fileId, handle, keydir) = ExceptT $ d
                            + BL.length row
                            - fromIntegral vsz
         !ken = KeyEntry (fromIntegral fileId) vsz vps tstamp
-        !kd' = M.insertWith latest key ken keydir
+        !kd' = if isTombstone fileId val
+                   then M.delete key keydir
+                   else M.insertWith latest key ken keydir
     BL.hPut handle row
     pure $ Right (dirname, fileId, handle, kd')
 
@@ -206,11 +214,7 @@ validate :: DataEntry -> Bool
 validate (DataEntry crc tsp ksz vsz key val) = crc == cksumBuild (builderDE tsp ksz vsz key val)
 
 getDataFilePath :: Integer -> FilePath
-getDataFilePath fileId = padLeft 3 '0' (show fileId) <> ".data"
-    where padLeft sz char str = go sz char (length str) str
-          go sz char len str = if len < sz
-                                   then go sz char (len + 1) (char:str)
-                                   else str
+getDataFilePath fileId = showFileId fileId <> ".data"
 
 cksum :: BL.ByteString -> W.Word32
 cksum = crc32 0x04c11db7 0x00000000 False False 0xffffffff
@@ -240,3 +244,20 @@ latest :: KeyEntry -> KeyEntry -> KeyEntry
 latest kel ker = if kTStamp ker > kTStamp kel
                      then ker
                      else kel
+
+-- | tombstone value
+tombstone :: Integer -> BL.ByteString
+tombstone fileId = BLU.fromString $ "bitcask_tombstone" <> showFileId fileId
+
+showFileId :: Integer -> String
+showFileId fileId = padLeft 3 '0' (show fileId)
+
+padLeft :: Int -> Char -> String -> String
+padLeft size char str = go size char (length str) str
+    where go sz c len s = if len < sz
+                              then go sz char (len + 1) (c:s)
+                              else s
+
+-- | Check if the given value is the tombstone value
+isTombstone :: Integer -> BL.ByteString -> Bool
+isTombstone fId val = val == tombstone fId
