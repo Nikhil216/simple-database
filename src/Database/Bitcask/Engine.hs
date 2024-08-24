@@ -132,10 +132,10 @@ createKeydir = lift . mkKeydir . distribute . mkRows
           mkKeyEntry kd rs = fst $ L.foldl' go (kd, 0) rs
           go (kd, pos) (fId, r) = (kd', pos')
               -- adding bytes taken by DataEntry
-              where vpos = pos + 4 + 8 + 4 + 4 + dKSize r
+              where vpos  = pos + 4 + 8 + 4 + 4 + dKSize r
                     !keyE = KeyEntry fId (dVSize r) vpos (dTStamp r)
                     !pos' = vpos + dVSize r
-                    !kd'  = M.insert (dKey r) keyE kd
+                    !kd'  = M.insertWith latest (dKey r) keyE kd
 
 getActiveHandle :: String -> [Integer] -> Session (Integer, Handle)
 getActiveHandle dirname ids = ExceptT $ do
@@ -198,7 +198,7 @@ updateValue key val  tstamp size (dirname, fileId, handle, keydir) = ExceptT $ d
                            + BL.length row
                            - fromIntegral vsz
         !ken = KeyEntry (fromIntegral fileId) vsz vps tstamp
-        !kd' = M.insert key ken keydir
+        !kd' = M.insertWith latest key ken keydir
     BL.hPut handle row
     pure $ Right (dirname, fileId, handle, kd')
 
@@ -234,3 +234,9 @@ filename2id = read . L.takeWhile (/= '.')
 -- | Path seperator (Windows)
 (\\) :: FilePath -> FilePath -> FilePath
 parent \\ child = parent <> "\\" <> child
+
+-- | Return the latest key entry
+latest :: KeyEntry -> KeyEntry -> KeyEntry
+latest kel ker = if kTStamp ker > kTStamp kel
+                     then ker
+                     else kel
