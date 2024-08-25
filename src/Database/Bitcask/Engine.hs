@@ -1,6 +1,5 @@
 {-# LANGUAGE BangPatterns #-}
 {-# LANGUAGE TupleSections #-}
-{-# OPTIONS_GHC -Wno-unused-top-binds #-}
 
 module Database.Bitcask.Engine
     ( BitcaskHandle
@@ -48,7 +47,7 @@ data KeyEntry = KeyEntry   { kFileId :: W.Word16
 
 type Keydir = M.Map BL.ByteString KeyEntry
 
-type BitcaskHandle = (FilePath, Integer, Handle, Keydir)
+type BitcaskHandle = (FilePath, W.Word16, Handle, Keydir)
 
 type Session a = ExceptT IOError IO a
 
@@ -112,7 +111,7 @@ mkdir dirname = catchLift $ do
               <> dirname
               <> " does not exists"
 
-readDataFiles :: FilePath -> Session [(Integer, BL.ByteString)]
+readDataFiles :: FilePath -> Session [(W.Word16, BL.ByteString)]
 readDataFiles dirname = catchLift $ do
     fnames   <- listDirectory dirname
     contents <- mapM (BL.readFile . (dirname \\)) fnames
@@ -126,11 +125,11 @@ readDataFiles dirname = catchLift $ do
           msg = "Data file is already active. Please close the"
               <> " running BitcaskHandle or close the file handle"
 
-createKeydir :: [(Integer, BL.ByteString)] -> Session Keydir
+createKeydir :: [(W.Word16, BL.ByteString)] -> Session Keydir
 createKeydir = lift . mkKeydir . distribute . mkRows
     where lift = ExceptT . pure . Right
           mkKeydir         = L.foldl' mkKeyEntry M.empty
-          mkRows           = fmap (bimap fromIntegral parseDataFile)
+          mkRows           = fmap (second parseDataFile)
           distribute       = fmap (\(fId, rs) -> map (fId,) (ckRows rs))
           ckRows           = filter validate
           mkKeyEntry kd rs = fst $ L.foldl' go (kd, 0) rs
@@ -139,11 +138,11 @@ createKeydir = lift . mkKeydir . distribute . mkRows
               where vpos  = pos + 4 + 8 + 4 + 4 + dKSize r
                     !ken  = KeyEntry fId (dVSize r) vpos (dTStamp r)
                     !pos' = vpos + dVSize r
-                    !kd'  = if isTombstone (fromIntegral fId) (dVal r)
+                    !kd'  = if isTombstone fId (dVal r)
                                then M.delete (dKey r) kd
                                else M.insertWith latest (dKey r) ken kd
 
-getActiveHandle :: String -> [Integer] -> Session (Integer, Handle)
+getActiveHandle :: String -> [W.Word16] -> Session (W.Word16, Handle)
 getActiveHandle dirname ids = ExceptT $ do
     hdl <- openFile fpath ReadWriteMode
     pure . Right $ (fId, hdl)
@@ -186,7 +185,7 @@ fetchValue ke (dirname, fileId, handle, _) = do
         else pure . Left  $ userError msg
     where vsize = fromIntegral $ kVSize ke
           vpos  = fromIntegral $ kVPos ke
-          fId   = fromIntegral $ kFileId ke
+          fId   = kFileId ke
           fPath = dirname \\ getDataFilePath fId
           msg   = "ReadError: Could not read from disk: "
                 <> "file: " <> getDataFilePath fId
@@ -201,9 +200,9 @@ updateValue key val tstamp size (dirname, fileId, handle, keydir) = ExceptT $ do
         !cks = cksumBuild bld
         !row = B.toLazyByteString $ B.word32BE cks <> bld
         !vps = fromIntegral $ fromIntegral size
-                           + BL.length row
-                           - fromIntegral vsz
-        !ken = KeyEntry (fromIntegral fileId) vsz vps tstamp
+                              + BL.length row
+                              - fromIntegral vsz
+        !ken = KeyEntry fileId vsz vps tstamp
         !kd' = if isTombstone fileId val
                    then M.delete key keydir
                    else M.insertWith latest key ken keydir
@@ -213,7 +212,7 @@ updateValue key val tstamp size (dirname, fileId, handle, keydir) = ExceptT $ do
 validate :: DataEntry -> Bool
 validate (DataEntry crc tsp ksz vsz key val) = crc == cksumBuild (builderDE tsp ksz vsz key val)
 
-getDataFilePath :: Integer -> FilePath
+getDataFilePath :: W.Word16 -> FilePath
 getDataFilePath fileId = showFileId fileId <> ".data"
 
 cksum :: BL.ByteString -> W.Word32
@@ -231,8 +230,8 @@ builderDE tstamp ksz vsz key val = mconcat [ B.word64BE tstamp
                                            ]
 
 -- | Convert a data file name into an id
---   Ex: "001.data" -> 1
-filename2id :: String -> Integer
+--   Ex: "0001.data" -> 1
+filename2id :: String -> W.Word16
 filename2id = read . L.takeWhile (/= '.')
 
 -- | Path seperator (Windows)
@@ -246,11 +245,11 @@ latest kel ker = if kTStamp ker > kTStamp kel
                      else kel
 
 -- | tombstone value
-tombstone :: Integer -> BL.ByteString
+tombstone :: W.Word16 -> BL.ByteString
 tombstone fileId = BLU.fromString $ "bitcask_tombstone" <> showFileId fileId
 
-showFileId :: Integer -> String
-showFileId fileId = padLeft 3 '0' (show fileId)
+showFileId :: W.Word16 -> String
+showFileId fileId = padLeft 4 '0' (show fileId)
 
 padLeft :: Int -> Char -> String -> String
 padLeft size char str = go size char (length str) str
@@ -259,5 +258,5 @@ padLeft size char str = go size char (length str) str
                               else s
 
 -- | Check if the given value is the tombstone value
-isTombstone :: Integer -> BL.ByteString -> Bool
+isTombstone :: W.Word16 -> BL.ByteString -> Bool
 isTombstone fId val = val == tombstone fId
