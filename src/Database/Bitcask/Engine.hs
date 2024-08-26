@@ -16,6 +16,7 @@ module Database.Bitcask.Engine
     ) where
 
 import           System.IO
+import           Control.Monad                 (foldM_)
 import           Control.DeepSeq               (force)
 import           Data.Digest.CRC32             (crc32)
 import           Data.Time.Clock.POSIX         (getPOSIXTime)
@@ -55,6 +56,9 @@ type Session a = ExceptT IOError IO a
 runSession :: Session a -> IO (Either IOError a)
 runSession = runExceptT
 
+fileSizeLimit :: Integral a => a
+fileSizeLimit = 2 ^ (27 :: Integer) -- 128 MiB
+
 open :: FilePath -> Session BitcaskHandle
 open dirname = do _          <- mkdir dirname
                   files      <- readDataFiles dirname
@@ -76,7 +80,7 @@ put key val (dirname, fileId, handle, keydir) = ExceptT $ do
     tstamp <- round . (* 1000) . force <$> getPOSIXTime
     size   <- hFileSize handle
     let update = updateValue key val tstamp
-    if size > 2 ^ (27 :: Integer) -- 128 MiB
+    if size > fileSizeLimit
         then do
             hFlush handle
             hClose handle
@@ -101,15 +105,18 @@ listKeys (_, _, _, keydir) = ExceptT . pure . Right . M.keys $ keydir
 
 merge :: FilePath -> Session ()
 merge dirname = do files  <- readDataFiles dirname
-                   let ids     = fmap fst files
-                       rows    = compactRows . createRows $ files
-                       content = encodeDataEntries rows
-                       fpaths  = fmap ((\\) dirname . getDataFilePath) ids
-                   (_, hdl) <- getActiveHandle dirname ids
-                   ExceptT . fmap pure $ do mapM_ D.removeFile fpaths
-                                            BL.hPutStr hdl content
-                                            hFlush hdl
-                                            hClose hdl
+                   let ids    = fmap fst files
+                       rows   = compactRows . createRows $ files
+                       strs   = encodeDataEntries rows
+                       fpaths = fmap ((dirname \\) . getDataFilePath) ids
+                   lift $ mapM_ D.removeFile fpaths
+                   foldM_ write [] strs
+    where lift          = ExceptT . fmap pure
+          write ids str = do (fId, hdl) <- getActiveHandle dirname ids
+                             lift $ do BL.hPut hdl str
+                                       hFlush hdl
+                                       hClose hdl
+                                       return (fId:ids)
 
 mkdir :: FilePath -> Session Bool
 mkdir dirname = catchLift $ do
@@ -255,10 +262,15 @@ builderDE tstamp ksz vsz key val = mconcat [ B.word64BE tstamp
                                            , B.lazyByteString val
                                            ]
 
-encodeDataEntries :: [DataEntry] -> BL.ByteString
-encodeDataEntries = B.toLazyByteString . mconcat . fmap build
-    where build (DataEntry crc tstamp ksz vsz key val) = B.word32BE crc
-                                                       <> builderDE tstamp ksz vsz key val
+encodeDataEntries :: [DataEntry] -> [BL.ByteString]
+encodeDataEntries = fmap B.toLazyByteString . snd . L.foldl' go (0, [])
+    where go (fsz, [])   de = (fsz + size de, [build de])
+          go (fsz, b:bs) de = if fsz < fileSizeLimit
+                                 then (fsz + size de, b <> build de : bs)
+                                 else (size de,       build de  : b : bs)
+          size  (DataEntry _   _      ksz vsz _   _  ) = 4 + 8 + 4 + 4 + ksz + vsz
+          build (DataEntry crc tstamp ksz vsz key val) = B.word32BE crc
+                                                        <> builderDE tstamp ksz vsz key val
 
 -- | Convert a data file name into an id
 --   Ex: "0001.data" -> 1
