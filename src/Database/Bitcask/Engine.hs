@@ -12,21 +12,22 @@ module Database.Bitcask.Engine
     , get
     , delete
     , listKeys
+    , merge
     ) where
 
 import           System.IO
 import           Control.DeepSeq               (force)
 import           Data.Digest.CRC32             (crc32)
-import           System.Directory              (createDirectoryIfMissing, listDirectory, doesDirectoryExist)
 import           Data.Time.Clock.POSIX         (getPOSIXTime)
 import           Control.Monad.Trans.Except    (ExceptT(..), runExceptT)
 import           Data.Bifunctor                (Bifunctor(..))
+import qualified System.Directory              as D
 import qualified Data.Binary.Get               as G
 import qualified Data.List                     as L
 import qualified Data.Word                     as W
+import qualified Data.ByteString.Lazy.UTF8     as BLU
 import qualified Data.ByteString.Lazy.Internal as BLI
 import qualified Data.ByteString.Lazy          as BL
-import qualified Data.ByteString.Lazy.UTF8     as BLU
 import qualified Data.ByteString.Builder       as B
 import qualified Data.Map.Strict               as M
 import qualified System.IO.Error               as E
@@ -57,8 +58,8 @@ runSession = runExceptT
 open :: FilePath -> Session BitcaskHandle
 open dirname = do _          <- mkdir dirname
                   files      <- readDataFiles dirname
-                  keydir     <- createKeydir files
-                  let ids     = map fst files
+                  let keydir =  createKeydir . createRows $ files
+                      ids    =  map fst files
                   (fId, hdl) <- getActiveHandle dirname ids
                   return (dirname, fId, hdl, keydir)
 
@@ -79,7 +80,7 @@ put key val (dirname, fileId, handle, keydir) = ExceptT $ do
         then do
             hFlush handle
             hClose handle
-            fnames <- listDirectory dirname
+            fnames <- D.listDirectory dirname
             let ids = map filename2id fnames
             runExceptT $ do (fId, hdl) <- getActiveHandle dirname ids
                             update 0 (dirname, fId, hdl, keydir)
@@ -89,8 +90,8 @@ put key val (dirname, fileId, handle, keydir) = ExceptT $ do
 get :: BL.ByteString -> BitcaskHandle -> Session (Maybe BL.ByteString)
 get key (dirname, fileId, handle, keydir) = ExceptT $ do
     case M.lookup key keydir of
-        Nothing -> pure . Right $ Nothing
-        Just ke -> (Just <$>) <$> fetchValue ke (dirname, fileId, handle, keydir)
+        Nothing -> pure . pure $ Nothing
+        Just ke -> fmap Just <$> fetchValue ke (dirname, fileId, handle, keydir)
 
 delete :: BL.ByteString -> BitcaskHandle -> Session BitcaskHandle
 delete key hdl@(_, fId, _, _) = put key (tombstone fId) hdl
@@ -98,10 +99,22 @@ delete key hdl@(_, fId, _, _) = put key (tombstone fId) hdl
 listKeys :: BitcaskHandle -> Session [BL.ByteString]
 listKeys (_, _, _, keydir) = ExceptT . pure . Right . M.keys $ keydir
 
+merge :: FilePath -> Session ()
+merge dirname = do files  <- readDataFiles dirname
+                   let ids     = fmap fst files
+                       rows    = compactRows . createRows $ files
+                       content = encodeDataEntries rows
+                       fpaths  = fmap ((\\) dirname . getDataFilePath) ids
+                   (_, hdl) <- getActiveHandle dirname ids
+                   ExceptT . fmap pure $ do mapM_ D.removeFile fpaths
+                                            BL.hPutStr hdl content
+                                            hFlush hdl
+                                            hClose hdl
+
 mkdir :: FilePath -> Session Bool
 mkdir dirname = catchLift $ do
-    exists <- doesDirectoryExist dirname
-    createDirectoryIfMissing False dirname
+    exists <- D.doesDirectoryExist dirname
+    D.createDirectoryIfMissing False dirname
     pure . Right $ not exists
     where catchLift = ExceptT . flip E.catchIOError handle
           handle err = if E.isDoesNotExistError err
@@ -113,7 +126,7 @@ mkdir dirname = catchLift $ do
 
 readDataFiles :: FilePath -> Session [(W.Word16, BL.ByteString)]
 readDataFiles dirname = catchLift $ do
-    fnames   <- listDirectory dirname
+    fnames   <- D.listDirectory dirname
     contents <- mapM (BL.readFile . (dirname \\)) fnames
     filterLift $ zip (map filename2id fnames) contents
     where notEmpty x = BL.length (snd x) /= 0
@@ -125,13 +138,10 @@ readDataFiles dirname = catchLift $ do
           msg = "Data file is already active. Please close the"
               <> " running BitcaskHandle or close the file handle"
 
-createKeydir :: [(W.Word16, BL.ByteString)] -> Session Keydir
-createKeydir = lift . mkKeydir . distribute . mkRows
-    where lift = ExceptT . pure . Right
+createKeydir :: [(W.Word16, [DataEntry])] -> Keydir
+createKeydir = mkKeydir . distribute
+    where distribute       = fmap (\(fId, rs) -> map (fId,) rs)
           mkKeydir         = L.foldl' mkKeyEntry M.empty
-          mkRows           = fmap (second parseDataFile)
-          distribute       = fmap (\(fId, rs) -> map (fId,) (ckRows rs))
-          ckRows           = filter validate
           mkKeyEntry kd rs = fst $ L.foldl' go (kd, 0) rs
           go (kd, pos) (fId, r) = (kd', pos')
               -- adding bytes taken by DataEntry
@@ -141,6 +151,7 @@ createKeydir = lift . mkKeydir . distribute . mkRows
                     !kd'  = if isTombstone fId (dVal r)
                                then M.delete (dKey r) kd
                                else M.insertWith latest (dKey r) ken kd
+                    latest = geMap kTStamp
 
 getActiveHandle :: String -> [W.Word16] -> Session (W.Word16, Handle)
 getActiveHandle dirname ids = ExceptT $ do
@@ -194,20 +205,35 @@ fetchValue ke (dirname, fileId, handle, _) = do
 
 updateValue :: BL.ByteString -> BL.ByteString -> W.Word64 -> Integer -> BitcaskHandle -> Session BitcaskHandle
 updateValue key val tstamp size (dirname, fileId, handle, keydir) = ExceptT $ do
-    let !ksz = fromIntegral . BL.length $ key
-        !vsz = fromIntegral . BL.length $ val
-        !bld = builderDE tstamp ksz vsz key val
-        !cks = cksumBuild bld
-        !row = B.toLazyByteString $ B.word32BE cks <> bld
-        !vps = fromIntegral $ fromIntegral size
-                              + BL.length row
-                              - fromIntegral vsz
-        !ken = KeyEntry fileId vsz vps tstamp
-        !kd' = if isTombstone fileId val
-                   then M.delete key keydir
-                   else M.insertWith latest key ken keydir
     BL.hPut handle row
     pure $ Right (dirname, fileId, handle, kd')
+    where !ksz = fromIntegral . BL.length $ key
+          !vsz = fromIntegral . BL.length $ val
+          !bld = builderDE tstamp ksz vsz key val
+          !cks = cksumBuild bld
+          !row = B.toLazyByteString $ B.word32BE cks <> bld
+          !vps = fromIntegral $ fromIntegral size
+                              + BL.length row
+                              - fromIntegral vsz
+          !ken = KeyEntry fileId vsz vps tstamp
+          !kd' = if isTombstone fileId val
+                     then M.delete key keydir
+                     else M.insertWith latest key ken keydir
+          latest = geMap kTStamp
+
+-- | filter out the stale values and get rid of tombstones
+compactRows :: [(W.Word16, [DataEntry])] -> [DataEntry]
+compactRows = fmap snd . M.elems . M.filter chkTombstone . mkMap . concat . distribute
+    where distribute = fmap (\(fId, rs) -> fmap (fId,) rs)
+          chkTombstone (fId, de) = not $ isTombstone fId (dVal de)
+          mkMap = L.foldl' go  M.empty
+          go acc (fId, de) = M.insertWith latest key (fId, de) acc
+              where latest = geMap (dTStamp . snd)
+                    key    = dKey de
+
+createRows :: [(W.Word16, BL.ByteString)] -> [(W.Word16, [DataEntry])]
+createRows = fmap (second (checkRows . parseDataFile))
+    where checkRows = filter validate
 
 validate :: DataEntry -> Bool
 validate (DataEntry crc tsp ksz vsz key val) = crc == cksumBuild (builderDE tsp ksz vsz key val)
@@ -229,6 +255,11 @@ builderDE tstamp ksz vsz key val = mconcat [ B.word64BE tstamp
                                            , B.lazyByteString val
                                            ]
 
+encodeDataEntries :: [DataEntry] -> BL.ByteString
+encodeDataEntries = B.toLazyByteString . mconcat . fmap build
+    where build (DataEntry crc tstamp ksz vsz key val) = B.word32BE crc
+                                                       <> builderDE tstamp ksz vsz key val
+
 -- | Convert a data file name into an id
 --   Ex: "0001.data" -> 1
 filename2id :: String -> W.Word16
@@ -238,11 +269,10 @@ filename2id = read . L.takeWhile (/= '.')
 (\\) :: FilePath -> FilePath -> FilePath
 parent \\ child = parent <> "\\" <> child
 
--- | Return the latest key entry
-latest :: KeyEntry -> KeyEntry -> KeyEntry
-latest kel ker = if kTStamp ker > kTStamp kel
-                     then ker
-                     else kel
+geMap :: Ord a => (t -> a) -> t -> t -> t
+geMap fn l r = if fn l >= fn r
+                   then l
+                   else r
 
 -- | tombstone value
 tombstone :: W.Word16 -> BL.ByteString
