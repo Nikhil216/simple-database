@@ -11,7 +11,7 @@ homepage:       https://github.com/Nikhil216/simple-database#readme
 bug-reports:    https://github.com/Nikhil216/simple-database/issues
 author:         Nikhil Devadiga
 maintainer:     nmdevadiga216@gmail.com
-copyright:      2023 Nikhil Devadiga
+copyright:      2023-present Nikhil Devadiga
 license:        BSD3
 license-file:   LICENSE
 build-type:     Simple

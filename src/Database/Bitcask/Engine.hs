@@ -93,10 +93,11 @@ put key val (dirname, fileId, handle, keydir) = ExceptT $ do
             runExceptT $ update size (dirname, fileId, handle, keydir)
 
 get :: BL.ByteString -> BitcaskHandle -> Session (Maybe BL.ByteString)
-get key (dirname, fileId, handle, keydir) = ExceptT $ do
+get key (dirname, fileId, handle, keydir) = do
     case M.lookup key keydir of
-        Nothing -> pure . pure $ Nothing
-        Just ke -> fmap Just <$> fetchValue ke (dirname, fileId, handle, keydir)
+        Nothing -> pure Nothing
+        Just ke -> do value <- fetchValue ke (dirname, fileId, handle, keydir)
+                      return $ filterMaybe (isTombstone fileId) value
 
 delete :: BL.ByteString -> BitcaskHandle -> Session BitcaskHandle
 delete key hdl@(_, fId, _, _) = put key (tombstone fId) hdl
@@ -159,20 +160,6 @@ readFiles isFile dirname = catchLift $ do
           msg = "Data file is already active. Please close the"
               <> " running BitcaskHandle or close the file handle"
 
-createKeydir :: [(W.Word16, [DataEntry])] -> Keydir
-createKeydir = mkKeydir . distribute
-    where distribute       = fmap (\(fId, rs) -> map (fId,) rs)
-          mkKeydir         = L.foldl' mkKeyEntry M.empty
-          mkKeyEntry kd rs = fst $ L.foldl' go (kd, 0) rs
-          go (kd, pos) (fId, r) = (kd', pos')
-              -- adding bytes taken by DataEntry
-              where vpos  = pos + 4 + 8 + 4 + 4 + dKSize r
-                    !ken  = KeyEntry fId (dVSize r) vpos (dTStamp r)
-                    !pos' = vpos + dVSize r
-                    !kd'  = if isTombstone fId (dVal r)
-                               then M.delete (dKey r) kd
-                               else insertKD (dKey r) ken kd
-
 getActiveHandle :: String -> [W.Word16] -> Session (W.Word16, Handle)
 getActiveHandle dirname ids = ExceptT $ do
     hdl <- openFile fpath ReadWriteMode
@@ -219,8 +206,8 @@ getKeydirPair = do tstamp <- G.getWord64be
                    key    <- G.getLazyByteString (fromIntegral ksz)
                    return (key, KeyEntry 0 vsz vpos tstamp)
 
-fetchValue :: KeyEntry -> BitcaskHandle -> IO (Either IOError BL.ByteString)
-fetchValue ke (dirname, fileId, handle, _) = do
+fetchValue :: KeyEntry -> BitcaskHandle -> Session BL.ByteString
+fetchValue ke (dirname, fileId, handle, _) = ExceptT $ do
     hld <- if fId == fileId
                then pure handle
                else openFile fPath ReadMode
@@ -251,9 +238,7 @@ updateValue key val tstamp size (dirname, fileId, handle, keydir) = ExceptT $ do
                               + BL.length row
                               - fromIntegral vsz
           !ken = KeyEntry fileId vsz vps tstamp
-          !kd' = if isTombstone fileId val
-                     then M.delete key keydir
-                     else insertKD key ken keydir
+          !kd' = insertKD key ken keydir
 
 writeDataEntries :: [DataEntry] -> [(BL.ByteString, BL.ByteString)]
 writeDataEntries = fmap (bimap B.toLazyByteString B.toLazyByteString . dropFst) . L.foldl' go []
@@ -295,6 +280,18 @@ loadKeydir files hints = L.foldl' append M.empty keydirs
           load (fId, str)   = M.map (update fId) (parseHintFile str)
           update fId ken    = ken { kFileId = fId }
           insert kd key ken = insertKD key ken kd
+
+createKeydir :: [(W.Word16, [DataEntry])] -> Keydir
+createKeydir = mkKeydir . distribute
+    where distribute       = fmap (\(fId, rs) -> map (fId,) rs)
+          mkKeydir         = L.foldl' mkKeyEntry M.empty
+          mkKeyEntry kd rs = fst $ L.foldl' go (kd, 0) rs
+          go (kd, pos) (fId, r) = (kd', pos')
+              -- adding bytes taken by DataEntry
+              where vpos  = pos + 4 + 8 + 4 + 4 + dKSize r
+                    !ken  = KeyEntry fId (dVSize r) vpos (dTStamp r)
+                    !pos' = vpos + dVSize r
+                    !kd'  = insertKD (dKey r) ken kd
 
 createRows :: [(W.Word16, BL.ByteString)] -> [(W.Word16, [DataEntry])]
 createRows = fmap (second (checkRows . parseDataFile))
@@ -368,3 +365,8 @@ isHintFile = (".hint" ==) . L.dropWhile (/= '.')
 insertKD :: BL.ByteString -> KeyEntry -> Keydir -> Keydir
 insertKD = M.insertWith latest
     where latest = geMap kTStamp
+
+filterMaybe :: (a -> Bool) -> a -> Maybe a
+filterMaybe p a
+    | p a       = Just a
+    | otherwise = Nothing
