@@ -4,7 +4,7 @@ github:              "Nikhil216/simple-database"
 license:             BSD3
 author:              "Nikhil Devadiga"
 maintainer:          "nmdevadiga216@gmail.com"
-copyright:           "2023 Nikhil Devadiga"
+copyright:           "2023-present Nikhil Devadiga"
 
 extra-source-files:
 - README.md
